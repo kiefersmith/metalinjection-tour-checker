@@ -17,7 +17,6 @@ SMTP_PORT = 587
 # Monitoring configuration
 URL = "https://metalinjection.net/category/tour-dates"
 CHECK_INTERVAL = 12*3600  # in seconds
-HASH_FILE = "page_hash.txt"
 CONTENT_FILE = "previous_articles.json"
 
 def get_page_content(url):
@@ -52,7 +51,7 @@ def extract_content(content):
         content_list.append({"title": h2, "url": href})
     return content_list
 
-def format_articles_html(articles):
+def format_articles(articles):
     email_body = "Here are the latest articles:\n"
     for article in articles:
         email_body += f'- {article["title"]} {article["url"]}\n'
@@ -84,7 +83,7 @@ def monitor_page():
             for article in articles_to_send:
                 print(f"- {article['title']} ({article['url']})")
             save_articles(new_articles)
-            email_body = format_articles_html(new_articles)
+            email_body = format_articles(new_articles)
             send_email(
                 "Metalinjection Tour Page Update Detected",
                 email_body
