@@ -8,4 +8,6 @@ RUN pip install -r requirements.txt
 
 COPY main.py .
 
+RUN mkdir articles
+
 CMD [ "python", "main.py" ]
