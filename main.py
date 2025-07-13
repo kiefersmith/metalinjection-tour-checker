@@ -8,6 +8,10 @@ import json
 import os
 import logging
 import sys
+import re
+#Simport spacy
+
+from db import init_db, insert_article
 
 # Email configuration
 EMAIL_ADDRESS = "kieferisgreat@gmail.com"
@@ -20,8 +24,11 @@ SMTP_PORT = 587
 URL = "https://metalinjection.net/category/tour-dates"
 CHECK_INTERVAL = 12*3600  # in seconds
 CONTENT_FILE = "articles/previous_articles.json"
-SEARCH_CITIES = ["Raleigh","Greensboro","Charlotte","Jacksonville","Chapel Hill", "Hillsborough"]
+SEARCH_CITIES = ["Raleigh","Greensboro","Charlotte","Jacksonville","Chapel Hill","Hillsborough","Asheville"]
+
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
+# nlp = spacy.load("en_core_web_sm")
+
 
 def get_page_content(url):
     response = requests.get(url)
@@ -72,6 +79,41 @@ def find_city(content_list):
 
     return article_list
 
+def extract_all_caps_bands(text):
+    pattern = r"\b[A-Z0-9][A-Z0-9\s&\-/]{1,}\b"
+    matches = re.findall(pattern, text)
+    bands = set()
+
+    for m in matches:
+        m_clean = m.strip()
+        if len(m_clean) < 3:
+            continue
+        # Reject if it's only digits or mostly digits
+        if re.fullmatch(r"[0-9\s\-\/]+", m_clean):
+            continue
+        # Reject Roman numerals (optional)
+        if re.fullmatch(r"[IVXLCDM]+", m_clean) and len(m_clean) < 6:
+            continue
+        
+        split_parts = [part.strip() for part in re.split(r"\s*&\s*", m_clean) if part.strip()]
+        bands.update(split_parts)
+
+    return list(bands)
+
+def extract_band_names(title, article_text=None):
+    # --- Step 1: Parse from title ---
+    title_bands = extract_all_caps_bands(title)
+
+    # --- Step 2: Optional NER from article body ---
+    ner_bands = []
+    if article_text:
+        doc = nlp(article_text)
+        ner_bands = [ent.text.strip() for ent in doc.ents if ent.label_ == "ORG"]
+
+    # --- Step 3: Merge and deduplicate ---
+    all_bands = list(set(title_bands + ner_bands))
+    return all_bands
+
 def format_articles(articles):
     email_body = "Here are the latest articles:\n"
     for article in articles:
@@ -80,7 +122,7 @@ def format_articles(articles):
     return email_body
 
 def format_city_articles(articles):
-    email_body = "These announcements have Raleigh in them:\n"
+    email_body = "These announcements have a city of interest in them:\n"
     for article in articles:
         email_body += f'- {article["title"]} {article["url"]}\n'
 
@@ -101,6 +143,7 @@ def send_email(subject, body):
 
 def monitor_page():
     try:
+        init_db()
         content = get_page_content(URL)
         new_articles = extract_content(content)
         previous_articles = load_previous_articles()
@@ -109,11 +152,16 @@ def monitor_page():
 
         if articles_to_send:
             logging.info("Found articles to send")
-            # for article in articles_to_send:
-            #     print(f"- {article['title']} ({article['url']})")
-            save_articles(new_articles)
+            save_articles(articles_to_send)
+
+            # Save to DB
+            for article in articles_to_send:
+                city_match = article in articles_city
+                bands = extract_band_names(article["title"]) # I think we can add article["body"] here but not sure
+                insert_article(article["title"], bands, article["url"], city_match)
+
             email_body = format_city_articles(articles_city)
-            email_body += "\n" + format_articles(new_articles)
+            email_body += "\n" + format_articles(articles_to_send)
             logging.debug(email_body)
             send_email(
                 "Metalinjection Tour Page Update Detected",
