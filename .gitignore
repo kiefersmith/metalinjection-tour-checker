@@ -1,2 +1,6 @@
 articles/*
 __pycache__/*
+.claude
+.claude/*
+venv
+venv/*
