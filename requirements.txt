@@ -2,3 +2,6 @@ requests
 bs4
 secure-smtplib
 setuptools
+flask
+tabulate
+playwright

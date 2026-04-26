@@ -1,13 +1,16 @@
-FROM python:3.9-alpine
+FROM python:3.12-slim
 
 WORKDIR /app
 
-COPY requirements.txt .
+COPY *.py /app
+COPY requirements.txt /app
+COPY start.sh /app
 
-RUN pip install -r requirements.txt
+RUN pip3 install -r requirements.txt
 
-COPY main.py .
+RUN python -m playwright install-deps firefox && \
+    python -m playwright install firefox
 
-RUN mkdir articles
+EXPOSE 5000
 
-CMD [ "python", "main.py" ]
+CMD [ "sh", "start.sh" ]
