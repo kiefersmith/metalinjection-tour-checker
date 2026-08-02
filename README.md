@@ -34,12 +34,23 @@ returns UNDEATH articles.
 Rows recorded before cities were tracked individually show `(unrecorded)` in the
 Cities column: a city matched, but which one wasn't stored at the time.
 
-**Note:** as of August 2026 the site's Cloudflare configuration returns 403 to
-non-browser clients for individual article pages, so the city check may fail and store
-`city_found` as NULL ("not checked") rather than 0. The article listing and email still
-work — the category page is served from Cloudflare's cache. Check with:
+**Note:** the site's Cloudflare configuration returns 403 to plain HTTP clients on
+individual article pages, and has since roughly April 2026. Browser-like request
+headers don't help — only a real browser engine gets through — so article bodies are
+fetched with Playwright's headless Firefox. The category listing still uses `requests`,
+because it's served from Cloudflare's edge cache.
 
-    curl -s -o /dev/null -w "%{http_code}\n" https://metalinjection.net/tour-dates/<any-article>
+Two consequences worth knowing:
+
+- **`requirements.txt` alone isn't enough.** After `pip install -r requirements.txt`,
+  run `playwright install firefox` to fetch the browser binary. The Docker image does
+  this at build time.
+- **The listing page depends on the exact URL.** `/category/tour-dates` is cached and
+  returns 200; `/category/tour-dates/` *with* a trailing slash misses the cache and gets
+  403. Don't "tidy" the `URL` constant in `main.py`.
+
+If a fetch fails, the article is stored with `city_found` NULL ("not checked"), which is
+deliberately distinct from 0 ("checked, nothing matched"), and the email says so.
 
 ### What this can't tell you yet
 

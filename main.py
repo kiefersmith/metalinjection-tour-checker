@@ -1,5 +1,7 @@
 import requests
 from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
+from contextlib import contextmanager
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -63,9 +65,42 @@ def extract_content(content):
         content_list.append({"title": heading.get_text(strip=True), "url": link["href"]})
     return content_list
 
-def cities_in_article(url):
+@contextmanager
+def article_fetcher():
+    """Yields a url -> html callable backed by one headless Firefox instance.
+
+    Article pages sit behind Cloudflare, which returns 403 to plain HTTP clients
+    whatever headers they send — a full Firefox-like header set still gets
+    blocked, so only a real browser engine gets through. The listing page is
+    exempt because it's served from the edge cache, and still uses requests.
+
+    The browser is launched once per run, not once per article: startup costs
+    far more than the fetch itself.
+    """
+    with sync_playwright() as playwright:
+        browser = playwright.firefox.launch(headless=True)
+        try:
+            def fetch(url):
+                page = browser.new_page()
+                try:
+                    response = page.goto(
+                        url, wait_until="domcontentloaded", timeout=REQUEST_TIMEOUT * 1000
+                    )
+                    # Without this an error page would parse as a body-less article
+                    # and be recorded as "checked, no cities" — a silent false negative.
+                    if response is not None and response.status >= 400:
+                        raise RuntimeError(f"HTTP {response.status} fetching {url}")
+                    return page.content()
+                finally:
+                    page.close()
+
+            yield fetch
+        finally:
+            browser.close()
+
+def cities_in_article(url, fetch):
     """Returns the cities of interest named in the article body, in SEARCH_CITIES order."""
-    body = BeautifulSoup(get_page_content(url), "html.parser").find("div", class_="zox-post-main")
+    body = BeautifulSoup(fetch(url), "html.parser").find("div", class_="zox-post-main")
     if body is None:
         # Not a standard post layout (video embed, redirect, ...); nothing to match on.
         logging.warning("No article body found at %s", url)
@@ -85,15 +120,41 @@ def find_cities(content_list):
     loudly, because otherwise it is indistinguishable from "no cities mentioned".
     """
     cities_by_url = {article["url"]: None for article in content_list}
+    if not content_list:
+        return cities_by_url
+
+    try:
+        with article_fetcher() as fetch:
+            failures, checked = _check_each_article(content_list, cities_by_url, fetch)
+    except Exception:
+        # The browser could not start at all — missing binary, missing system
+        # libraries. Every article stays None ("not checked") rather than being
+        # recorded as "no cities".
+        logging.exception("Could not start the browser; no city checks ran")
+        return cities_by_url
+
+    if failures and failures == checked:
+        logging.error(
+            "Every city check failed (%d/%d) — assume the site is blocking us or has "
+            "changed, NOT that no cities were mentioned",
+            failures, checked,
+        )
+    elif failures:
+        logging.warning("%d of %d city checks failed", failures, checked)
+
+    return cities_by_url
+
+def _check_each_article(content_list, cities_by_url, fetch):
+    """Fills in cities_by_url in place; returns (failures, articles attempted)."""
     failures = 0
     consecutive = 0
     checked = 0
 
     for index, content in enumerate(content_list):
         if consecutive >= FAILURE_CUTOFF:
-            # Article pages are blocked wholesale (Cloudflare serves 403 to
-            # non-browser clients on a cache miss). Grinding through the rest just
-            # burns FETCH_DELAY per article for no result.
+            # Something is refusing us wholesale — the Cloudflare rule tightening
+            # again, or the browser wedged. Grinding through the rest just burns
+            # FETCH_DELAY per article for no result.
             logging.error(
                 "Giving up on city checks after %d consecutive failures; "
                 "%d article(s) left unchecked",
@@ -106,23 +167,14 @@ def find_cities(content_list):
 
         checked += 1
         try:
-            cities_by_url[content["url"]] = cities_in_article(content["url"])
+            cities_by_url[content["url"]] = cities_in_article(content["url"], fetch)
             consecutive = 0
         except Exception:
             failures += 1
             consecutive += 1
             logging.exception("Could not check cities for %s", content["url"])
 
-    if failures and failures == checked:
-        logging.error(
-            "Every city check failed (%d/%d) — assume the site is blocking us or has "
-            "changed, NOT that no cities were mentioned",
-            failures, checked,
-        )
-    elif failures:
-        logging.warning("%d of %d city checks failed", failures, checked)
-
-    return cities_by_url
+    return failures, checked
 
 # All-caps words that show up in headlines but are never band names on their own.
 # Everything here genuinely appears capitalised in copy — "LISTEN:", "U.S.", "NYC".
