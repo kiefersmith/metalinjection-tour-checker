@@ -16,6 +16,7 @@ import logging
 import sys
 import re
 
+import geo
 from db import (
     init_db,
     insert_article,
@@ -38,15 +39,49 @@ REQUEST_TIMEOUT = 30  # seconds; without this a stalled connection blocks foreve
 FETCH_DELAY = 2  # seconds between article fetches, to stay a polite client
 FAILURE_CUTOFF = 3  # consecutive article failures before abandoning city checks for a run
 LEGACY_CONTENT_FILE = "articles/previous_articles.json"
-SEARCH_CITIES = ["Raleigh","Greensboro","Charlotte","Jacksonville","Chapel Hill","Hillsborough","Asheville"]
+# Where you are. Any show within RADIUS_MILES of here counts, which catches
+# nearby cities you'd never think to list (Durham is 21 miles out; Fayetteville
+# 52) without naming them all.
+HOME = ("Raleigh", "NC")
+RADIUS_MILES = 100
+
+# Always match these, however far away — places worth the drive, plus anywhere
+# the geocoder can't resolve. Hillsborough, NC is under the dataset's population
+# floor, so without this entry the radius alone would silently never match it.
+SEARCH_CITIES = [
+    ("Raleigh", "NC"),
+    ("Greensboro", "NC"),
+    ("Charlotte", "NC"),
+    ("Jacksonville", "NC"),
+    ("Chapel Hill", "NC"),
+    ("Hillsborough", "NC"),
+    ("Asheville", "NC"),
+]
 
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 
-# Matches a city only as a whole word, so "Charlotte" doesn't hit "Charlottesville".
-CITY_PATTERN = re.compile(
-    r"\b(" + "|".join(re.escape(city) for city in SEARCH_CITIES) + r")\b",
-    re.IGNORECASE,
-)
+# "Durham, NC" — a city followed by a two-letter state. Requiring the state is
+# what stops "Jacksonville" (Florida) and "Charlotte" (a person's name) from
+# matching; the pair is then checked against HOME/SEARCH_CITIES.
+CITY_STATE_PATTERN = re.compile(r"\b([A-Z][A-Za-z.'\-]*(?: [A-Z][A-Za-z.'\-]*){0,3})\s*,\s*([A-Z]{2})\b")
+
+_WANTED_CITIES = {(city.casefold(), state.upper()) for city, state in SEARCH_CITIES}
+
+
+def is_near_home(city, state):
+    """True if a show in this city is one you'd want to know about."""
+    if not city or not state:
+        return False
+    if (city.strip().casefold(), state.strip().upper()) in _WANTED_CITIES:
+        return True
+    distance = geo.distance_from(HOME, city, state)
+    return distance is not None and distance <= RADIUS_MILES
+
+
+def describe_place(city, state):
+    """'Durham, NC (21 mi)' — the distance is what makes a match checkable."""
+    distance = geo.distance_from(HOME, city, state)
+    return f"{city}, {state}" + (f" ({distance:.0f} mi)" if distance is not None else "")
 
 
 def get_page_content(url):
@@ -108,23 +143,56 @@ def article_fetcher():
         finally:
             browser.close()
 
-# What one article fetch yielded. `text` is kept because the tour-date parser
-# needs the body, and re-fetching it later would mean a second trip through the
-# browser for every article.
-ArticleCheck = namedtuple("ArticleCheck", "cities text")
+# What one article fetch yielded.
+#   places — (city, state) pairs near home, deduplicated, for storage and email
+#   shows  — the matching (date, city, state, venue) rows, when dates parsed
+#   dates  — every show parsed from the article, near or not
+#   text   — the body, kept so nothing needs a second trip through the browser
+ArticleCheck = namedtuple("ArticleCheck", "places text shows dates")
+
+EMPTY_CHECK = ArticleCheck([], "", [], [])
 
 def check_article(url, fetch):
-    """Returns an ArticleCheck for one article: matched cities and the body text."""
+    """Returns an ArticleCheck: which nearby places an article mentions, and why.
+
+    Matching prefers the parsed show listings, because those carry a state and so
+    can tell Jacksonville NC from Jacksonville FL. Prose is only consulted when
+    no dates parsed at all, and even then a bare city name is ignored — the state
+    has to be right there next to it.
+    """
     body = BeautifulSoup(fetch(url), "html.parser").find("div", class_="zox-post-main")
     if body is None:
         # Not a standard post layout (video embed, redirect, ...); nothing to match on.
         logging.warning("No article body found at %s", url)
-        return ArticleCheck([], "")
+        return EMPTY_CHECK
 
     text = body.get_text(" ", strip=True)
-    found = {match.group(1).lower() for match in CITY_PATTERN.finditer(text)}
-    cities = [city for city in SEARCH_CITIES if city.lower() in found]
-    return ArticleCheck(cities, text)
+    dates = parse_tour_dates(text)
+
+    if dates:
+        shows = [d for d in dates if is_near_home(d[1], d[2])]
+        places = _unique_places((city, state) for _, city, state, _ in shows)
+        return ArticleCheck(places, text, shows, dates)
+
+    # No parseable listing. Fall back to any "City, ST" in the prose, which still
+    # rejects a bare "Charlotte", but can't say which night the show is.
+    places = _unique_places(
+        (match.group(1), match.group(2))
+        for match in CITY_STATE_PATTERN.finditer(text)
+        if is_near_home(match.group(1), match.group(2))
+    )
+    return ArticleCheck(places, text, [], [])
+
+def _unique_places(pairs):
+    """Deduplicates (city, state) pairs case-insensitively, keeping first seen."""
+    seen = set()
+    unique = []
+    for city, state in pairs:
+        key = (city.casefold(), state.upper())
+        if key not in seen:
+            seen.add(key)
+            unique.append((city, state.upper()))
+    return unique
 
 def check_articles(content_list):
     """Maps each article URL to its ArticleCheck, or None if it couldn't be read.
@@ -296,9 +364,15 @@ def format_articles(heading, articles, empty_text=None, checks_by_url=None):
     if articles:
         for article in articles:
             check = (checks_by_url or {}).get(article["url"])
-            cities = check.cities if check else None
-            suffix = f' [{", ".join(cities)}]' if cities else ""
+            places = check.places if check else None
+            suffix = (
+                f' [{", ".join(describe_place(c, s) for c, s in places)}]' if places else ""
+            )
             lines.append(f'- {article["title"]}{suffix} {article["url"]}')
+            # Naming the night and the venue makes a wrong match obvious, where
+            # a bare city name hides it.
+            for date_iso, city, state, venue in (check.shows if check else []):
+                lines.append(f'    {date_iso}  {city}, {state} @ {venue}')
     else:
         lines.append(empty_text or "(none)")
     return "\n".join(lines) + "\n"
@@ -347,16 +421,48 @@ def migrate_legacy_articles():
     os.rename(LEGACY_CONTENT_FILE, LEGACY_CONTENT_FILE + ".migrated")
     logging.info("Migrated %d article(s) from %s into the database", added, LEGACY_CONTENT_FILE)
 
+MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+MONTH_NUMBERS = {name.casefold(): number for number, name in enumerate(MONTH_NAMES, start=1)}
+_MONTH_ALT = "|".join(MONTH_NAMES)
+_DATE_HEAD = rf"(?:{_MONTH_ALT})[a-z]*\.?\s+\d{{1,2}}"
+
+# "Oct 21 – Charlotte, NC @ The Underground (w/ Gridiron)". The dash is what
+# separates a listing from prose like "Oct 3 at the House of Blues in San Diego",
+# which otherwise runs on until it finds an unrelated comma-state pair.
+MONTH_DATE_PATTERN = re.compile(
+    rf"({_MONTH_ALT})[a-z]*\.?\s+(\d{{1,2}})\s*[–—-]+\s*"
+    rf"([^,\d]{{2,28}}?)\s*,\s*([A-Z]{{2}})\b\s*@?\s*(.*?)(?=\s*{_DATE_HEAD}\b|$)"
+)
+
+def _parse_month_name_dates(text, year_hint):
+    """Parses the 'Oct 21 – City, ST @ Venue' listing style."""
+    results = []
+    for month, day, city, state, venue in MONTH_DATE_PATTERN.findall(text):
+        month_int = MONTH_NUMBERS[month.casefold()]
+        day_int = int(day)
+        if not 1 <= day_int <= 31:
+            continue
+        venue = venue.strip(" .–—-")
+        if not venue:
+            continue
+        results.append((f"{year_hint}-{month_int:02d}-{day_int:02d}", city.strip(), state, venue))
+    return results
+
 def parse_tour_dates(article_text, year_hint=None):
     """Parses individual show dates out of an article body.
 
-    Articles list dates as concatenated text like:
-    3/25 Philadelphia, PA Milkboy3/26 Hamden, CT Cellar on Treadwell
+    Two listing styles appear on the site:
+      3/25 Philadelphia, PA Milkboy3/26 Hamden, CT Cellar on Treadwell
+      Oct 21 – Charlotte, NC @ The Underground
 
     Returns list of (date_iso, city, state, venue) tuples.
     """
     if not article_text:
         return []
+
+    # Non-breaking spaces are everywhere in these listings and would otherwise
+    # defeat every \s-based boundary below.
+    article_text = article_text.replace("\xa0", " ")
 
     # Infer year from article text or default to current year
     if year_hint is None:
@@ -396,6 +502,10 @@ def parse_tour_dates(article_text, year_hint=None):
 
         results.append((date_iso, city, state, venue))
 
+    # The two styles don't co-occur in practice, so this just picks up whichever
+    # one the article used.
+    results.extend(_parse_month_name_dates(article_text, year_hint))
+
     # Deduplicate while preserving order
     seen = set()
     unique = []
@@ -425,8 +535,7 @@ def backfill_tour_dates():
                 if index:
                     time.sleep(FETCH_DELAY)
                 try:
-                    check = check_article(url, fetch)
-                    dates = parse_tour_dates(check.text)
+                    dates = check_article(url, fetch).dates
                     if dates:
                         insert_tour_dates(article_id, extract_band_names(title), dates)
                         filled += 1
@@ -455,7 +564,7 @@ def monitor_page():
             checks_by_url = check_articles(articles_to_send)
             articles_city = [
                 a for a in articles_to_send
-                if (checks_by_url.get(a["url"]) or ArticleCheck([], "")).cities
+                if (checks_by_url.get(a["url"]) or EMPTY_CHECK).places
             ]
 
             # Distinguish "checked, nothing matched" from "could not check", so a
@@ -466,10 +575,11 @@ def monitor_page():
             elif unchecked:
                 empty_text = f"(none found, but {unchecked} article(s) could not be checked)"
             else:
-                empty_text = "(no nearby cities mentioned this time)"
+                empty_text = "(no shows near you this time)"
 
             email_body = format_articles(
-                "These announcements have a city of interest in them:",
+                f"These announcements have a show within {RADIUS_MILES} miles of "
+                f"{HOME[0]}, {HOME[1]} (or in your listed cities):",
                 articles_city,
                 empty_text=empty_text,
                 checks_by_url=checks_by_url,
@@ -492,12 +602,12 @@ def monitor_page():
                 # rather than as "no cities".
                 article_id = insert_article(
                     article["title"], bands, article["url"],
-                    check.cities if check else None,
+                    check.places if check else None,
                 )
-                # The body text is already in hand from the city check, so the
-                # individual show dates come for free — no second fetch.
-                if article_id and check and check.text:
-                    insert_tour_dates(article_id, bands, parse_tour_dates(check.text))
+                # Dates were already parsed during the check, so storing them
+                # costs nothing extra here.
+                if article_id and check:
+                    insert_tour_dates(article_id, bands, check.dates)
         else:
             logging.info("No changes found.")
 

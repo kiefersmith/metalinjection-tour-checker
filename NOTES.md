@@ -24,10 +24,23 @@
 >
 > `web.py`, `start.sh` and `--backfill` all came in with the merge and are kept.
 >
-> **Known gap:** `parse_tour_dates` only handles the numeric listing format
-> (`3/25 Philadelphia, PA Milkboy`). Articles using `Oct 21 – Charlotte, NC @ Venue`
-> parse to zero dates. This predates the merge — `origin/main`'s parser has the same
-> limitation — but it means some articles record a city match with no show dates.
+> ~~**Known gap:** `parse_tour_dates` only handles the numeric listing format.~~
+> Fixed — the `Oct 21 – Charlotte, NC @ Venue` style parses now too.
+>
+> **Location matching was rebuilt on top of that (2026-08-02).** The old check
+> matched bare city names anywhere in the body, which was wrong in both directions:
+>
+> - Every `Jacksonville` row in the database is Florida. That entry in
+>   `SEARCH_CITIES` had only ever produced false alarms.
+> - `Charlotte` matched Charlotte Wessels, a vocalist. `Chapel Hill` matched a road
+>   in Dallas. All seven adversarial cases tried came back positive.
+> - Meanwhile Durham (21 mi) and Fayetteville (52 mi) never matched at all, though
+>   both are closer than Greensboro and Jacksonville NC, which were listed.
+>
+> Now: matching runs over the parsed show rows (which carry a state), a city only
+> counts alongside its state, and anything within `RADIUS_MILES` of `HOME` counts
+> whether or not it's listed. `SEARCH_CITIES` remains for long drives and for towns
+> below the geocoder's population floor — Hillsborough, NC among them.
 
 ## Re-check 2026-08-02 — block still applies, nothing has changed
 

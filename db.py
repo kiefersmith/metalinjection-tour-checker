@@ -42,7 +42,8 @@ def init_db(band_extractor=None):
             CREATE TABLE IF NOT EXISTS article_cities (
                 article_id INTEGER NOT NULL REFERENCES tour_articles(id),
                 city TEXT NOT NULL,
-                PRIMARY KEY (article_id, city)
+                state TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (article_id, city, state)
             )
         ''')
         # Individual show dates parsed out of the article body: the only table
@@ -118,10 +119,12 @@ def _link_bands(conn, article_id, bands):
         [(article_id, band) for band in bands if band],
     )
 
-def _link_cities(conn, article_id, cities):
+def _link_cities(conn, article_id, places):
+    """`places` is a list of (city, state) pairs. The state is what makes
+    Jacksonville NC distinguishable from Jacksonville FL when querying later."""
     conn.executemany(
-        "INSERT OR IGNORE INTO article_cities (article_id, city) VALUES (?, ?)",
-        [(article_id, city) for city in cities if city],
+        "INSERT OR IGNORE INTO article_cities (article_id, city, state) VALUES (?, ?, ?)",
+        [(article_id, city, state) for city, state in places if city],
     )
 
 def known_urls():
@@ -129,11 +132,11 @@ def known_urls():
     with _connect() as conn:
         return {row[0] for row in conn.execute("SELECT url FROM tour_articles")}
 
-def insert_article(title, bands, url, cities):
-    """Records an article and its bands/cities.
+def insert_article(title, bands, url, places):
+    """Records an article, its bands, and the nearby places it mentions.
 
-    `cities` is the list of matched cities, or None when the check never ran (the
-    city columns then stay NULL rather than claiming a negative result).
+    `places` is a list of (city, state) pairs, or None when the check never ran
+    (city_found then stays NULL rather than claiming a negative result).
     """
     with _connect() as conn, conn:
         try:
@@ -144,7 +147,7 @@ def insert_article(title, bands, url, cities):
                 title,
                 ", ".join(bands),
                 url,
-                None if cities is None else bool(cities),
+                None if places is None else bool(places),
                 datetime.now().isoformat(),
             ))
         except sqlite3.IntegrityError:
@@ -152,6 +155,6 @@ def insert_article(title, bands, url, cities):
             return None
 
         _link_bands(conn, cursor.lastrowid, bands)
-        _link_cities(conn, cursor.lastrowid, cities or [])
+        _link_cities(conn, cursor.lastrowid, places or [])
         # Returned so the caller can attach show dates to this article.
         return cursor.lastrowid

@@ -2,7 +2,24 @@ This is a small script that checks the tour announcements page at metalinjection
 
 You'll need to change the variables under "email configuration" at the top.  You'll also need to set the environment variable "EMAIL_PASSWORD" to your email password.  I used a Google app password for my email password.
 
-You can update the SEARCH_CITIES variable to look for cities near you / cities of interest.
+## Where you want to see shows
+
+Two settings at the top of `main.py`, and a show matches if *either* applies:
+
+    HOME = ("Raleigh", "NC")   # anything within RADIUS_MILES of here counts
+    RADIUS_MILES = 100
+    SEARCH_CITIES = [...]      # always match these, however far away
+
+The radius catches nearby cities you'd never think to list — Durham is 21 miles
+out, Fayetteville 52 — without naming them all. `SEARCH_CITIES` covers the two
+cases a radius can't: places worth a longer drive (Charlotte at 130 miles,
+Asheville at 220), and places the geocoder doesn't know. Coordinates come from
+`geonamescache`, which only carries towns above roughly 15,000 people, so
+Hillsborough, NC has to be listed explicitly or it would never match.
+
+**Cities are always matched together with their state.** A bare "Jacksonville"
+is ignored — every Jacksonville in the database so far has been Florida, not the
+one in NC — as is a "Charlotte" that turns out to be a person's name.
 
 ## Running
 
@@ -69,13 +86,18 @@ Individual show dates are parsed out of article bodies into the `tour_dates` tab
 (band, date, city, state, venue) and browsable in the web UI. `python main.py --backfill`
 fills them in for articles already stored but not yet parsed.
 
-The parser only understands the numeric listing format:
+Both listing styles the site uses are understood:
 
     3/25 Philadelphia, PA Milkboy3/26 Hamden, CT Cellar on Treadwell
+    Oct 21 – Charlotte, NC @ The Underground
 
-Articles that write dates as `Oct 21 – Charlotte, NC @ The Underground` are **not**
-parsed and yield no rows. That's a known gap, not a failure — the article is still
-recorded and its city match still works.
+The second form requires the dash. That's deliberate: it's what separates a listing
+from prose like "Oct 3 at the House of Blues in San Diego", which otherwise runs on
+until it hits an unrelated `City, ST` and invents a show.
+
+Because matching prefers these parsed rows, the email can name the night and the
+venue rather than just a city — which makes a wrong match visible instead of silent.
+Prose is only consulted when an article has no parseable listing at all.
 
 ### What this can't tell you yet
 

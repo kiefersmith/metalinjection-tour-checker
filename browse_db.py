@@ -17,8 +17,10 @@ def get_articles(limit=10, city=None, band=None):
         SELECT a.title,
                a.bands,
                COALESCE(
-                   (SELECT GROUP_CONCAT(c.city, ', ') FROM article_cities c
-                     WHERE c.article_id = a.id),
+                   (SELECT GROUP_CONCAT(
+                               c.city || CASE WHEN c.state <> '' THEN ', ' || c.state ELSE '' END,
+                               ' / ')
+                      FROM article_cities c WHERE c.article_id = a.id),
                    CASE WHEN a.city_found = 1 THEN '(unrecorded)' ELSE '' END
                ) AS cities,
                a.date_scraped,
@@ -73,10 +75,12 @@ def get_cities():
     """Every matched city with how many articles mention it."""
     with _connect() as conn:
         return conn.execute('''
-            SELECT c.city, COUNT(*) AS mentions, MAX(a.date_scraped) AS latest
+            SELECT c.city || CASE WHEN c.state <> '' THEN ', ' || c.state ELSE '' END AS place,
+                   COUNT(*) AS mentions,
+                   MAX(a.date_scraped) AS latest
               FROM article_cities c JOIN tour_articles a ON a.id = c.article_id
-             GROUP BY c.city COLLATE NOCASE
-             ORDER BY mentions DESC, c.city
+             GROUP BY place COLLATE NOCASE
+             ORDER BY mentions DESC, place
         ''').fetchall()
 
 def main():

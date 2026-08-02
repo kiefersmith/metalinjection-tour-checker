@@ -3,3 +3,4 @@ beautifulsoup4
 tabulate
 playwright
 flask
+geonamescache
