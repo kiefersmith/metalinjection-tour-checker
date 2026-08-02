@@ -1,5 +1,18 @@
 # Open decision: how to get show dates (paused 2026-08-01)
 
+> ## RESOLVED 2026-08-02 — option 2 is implemented
+> The Playwright fetch is ported onto `august-improvements` and working: article
+> bodies fetch again and the city check is live (it matched Charlotte and
+> Jacksonville on the PEELINGFLESH dates on its first real run). The rest of this
+> file is kept as the record of how the block was diagnosed and why the other
+> options were weighed.
+>
+> **Still open:** option 1 (an events API) is the only route to *historical*
+> "when did BAND last play CITY" data. The scraper still only accumulates forward.
+> That decision is untouched by this work.
+>
+> Also not ported: `master`'s `web.py`, `start.sh` and `--backfill`.
+
 ## Re-check 2026-08-02 — block still applies, nothing has changed
 
 Ran the probe at the bottom of this file. **Articles are still 403.** Option 2 is not
@@ -232,15 +245,21 @@ Re-check whether the block still applies (done 2026-08-02 — still 403, see top
 200 means the situation changed and option 2 (or plain scraping) is back on the table.
 Check the trailing-slash variant too — variant sensitivity is real on this site.
 
-The Playwright question is now answered — it works (2026-08-02). The remaining work for
-option 2 is not the fetcher, it's the **merge**: bring `master`'s Playwright fetch into
-`main`'s current uncommitted August code (NULL `city_found` handling, `FAILURE_CUTOFF`,
-logging, legacy migration) rather than the reverse, since `master` predates all of it.
+Done, on branch `august-improvements` (2026-08-02):
 
-Suggested order:
+1. ~~Commit the uncommitted August work~~ — `811e54e`, `e9a5dc0`.
+2. ~~Fix the band parser~~ — `f1b75c9`. All-caps connectives are kept inside names now
+   (`FAITH NO MORE`, `SYSTEM OF A DOWN`); `test_bands.py` covers 21 real headlines.
+3. ~~Port the Playwright fetch~~ — `22ed1ca`. Browser launched once per run, non-2xx
+   raises so a block page can't read as "no cities", base image moved to `python:3.12-slim`.
 
-1. Commit the uncommitted August work on `main` first, so it can't be lost.
-2. Port `get_article_content_playwright()` + the Playwright `Dockerfile` bits from
-   `master` into `main`. Keep `main`'s error handling and `city_found` semantics.
-3. Decide separately whether `master`'s `web.py` / `start.sh` / `--backfill` are wanted.
-4. Only then consider the one-off re-check script for any NULL rows (currently none).
+Left to decide:
+
+- Whether `master`'s `web.py` / `start.sh` / `--backfill` are worth porting too.
+- Option 1 (events API) for historical show dates — unaffected by any of the above.
+- The NULL-row backfill script is still unnecessary: there are no NULL rows yet.
+
+**Before the first real run**, note it will email about ~23 articles at once, since the
+DB last saw the site on 2026-04-11. Nothing is lost by that — with the fetch working
+again those rows get real `city_found` values rather than NULLs — but the email will be
+long. Consider seeding the DB quietly first if that's not wanted.
