@@ -45,9 +45,50 @@ def init_db(band_extractor=None):
                 PRIMARY KEY (article_id, city)
             )
         ''')
+        # Individual show dates parsed out of the article body: the only table
+        # here that answers "when is BAND playing CITY".
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS tour_dates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                article_id INTEGER NOT NULL REFERENCES tour_articles(id),
+                band TEXT NOT NULL,
+                date TEXT NOT NULL,
+                city TEXT NOT NULL,
+                state TEXT NOT NULL,
+                venue TEXT NOT NULL
+            )
+        ''')
         conn.execute("CREATE INDEX IF NOT EXISTS idx_bands_band ON article_bands(band)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_cities_city ON article_cities(city)")
+        for column in ("band", "city", "state", "date", "article_id"):
+            conn.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_tour_dates_{column} ON tour_dates({column})"
+            )
         _backfill_bands(conn, band_extractor)
+
+def insert_tour_dates(article_id, bands, tour_dates):
+    """Records one row per (band, show date) for an article."""
+    if not article_id or not tour_dates:
+        return
+    rows = [
+        (article_id, band, date_iso, city, state, venue)
+        for band in bands
+        for date_iso, city, state, venue in tour_dates
+    ]
+    with _connect() as conn, conn:
+        conn.executemany('''
+            INSERT INTO tour_dates (article_id, band, date, city, state, venue)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', rows)
+
+def articles_without_tour_dates():
+    """Returns (id, title, url) for articles that have no show dates recorded."""
+    with _connect() as conn, conn:
+        return conn.execute('''
+            SELECT id, title, url FROM tour_articles
+            WHERE id NOT IN (SELECT DISTINCT article_id FROM tour_dates)
+            ORDER BY id
+        ''').fetchall()
 
 def _backfill_bands(conn, band_extractor=None):
     """Populates article_bands for rows written before the table existed.
@@ -108,7 +149,9 @@ def insert_article(title, bands, url, cities):
             ))
         except sqlite3.IntegrityError:
             # Duplicate URL — already inserted
-            return
+            return None
 
         _link_bands(conn, cursor.lastrowid, bands)
         _link_cities(conn, cursor.lastrowid, cities or [])
+        # Returned so the caller can attach show dates to this article.
+        return cursor.lastrowid

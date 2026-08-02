@@ -4,6 +4,17 @@ You'll need to change the variables under "email configuration" at the top.  You
 
 You can update the SEARCH_CITIES variable to look for cities near you / cities of interest.
 
+## Running
+
+    pip install -r requirements.txt
+    python -m playwright install firefox   # once; article pages need a real browser
+
+    EMAIL_PASSWORD=<password> python main.py     # the monitoring loop
+    python main.py --backfill                    # parse show dates for stored articles
+    python web.py                                # web UI on :5000
+
+In Docker, `start.sh` runs the loop and the web UI together.
+
 ## State
 
 Everything lives in `articles/`:
@@ -52,12 +63,26 @@ Two consequences worth knowing:
 If a fetch fails, the article is stored with `city_found` NULL ("not checked"), which is
 deliberately distinct from 0 ("checked, nothing matched"), and the email says so.
 
+### Show dates
+
+Individual show dates are parsed out of article bodies into the `tour_dates` table
+(band, date, city, state, venue) and browsable in the web UI. `python main.py --backfill`
+fills them in for articles already stored but not yet parsed.
+
+The parser only understands the numeric listing format:
+
+    3/25 Philadelphia, PA Milkboy3/26 Hamden, CT Cellar on Treadwell
+
+Articles that write dates as `Oct 21 – Charlotte, NC @ The Underground` are **not**
+parsed and yield no rows. That's a known gap, not a failure — the article is still
+recorded and its city match still works.
+
 ### What this can't tell you yet
 
-There are no *show* dates — only the date an article was scraped — so "when did BAND
-last play Raleigh" and "when are they back" can't be answered directly. That needs the
-per-date listings parsed out of article bodies into a shows table. It also only
-accumulates going forward; nothing before the database started recording is available.
+The database only accumulates going forward: shows announced before it started
+recording aren't available, so "when did BAND *last* play Raleigh" can't be answered
+for anything older than the first run. That needs an events API (setlist.fm and
+friends) rather than the scraper — see `NOTES.md`.
 
 ## Docker
 

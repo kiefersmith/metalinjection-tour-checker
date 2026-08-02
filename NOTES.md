@@ -1,5 +1,16 @@
 # Open decision: how to get show dates (paused 2026-08-01)
 
+> ## Correction 2026-08-02 — `master` was never stranded
+> The sections below describe `master`/`save` as unmerged work. That was wrong, and
+> came from reading a **stale local `main`**. On GitHub, PR #1 merged `master` into
+> `main` on 2026-04-26; remote `main` has had the Playwright fetch, the `tour_dates`
+> parser, `web.py` and `--backfill` ever since. The local clone had simply never
+> pulled. `save` is a redundant orphan snapshot of the same work — still ignorable.
+>
+> Consequence: the August branch was built on a base four months behind, and briefly
+> looked like it "added" Playwright that already existed. It has now been merged with
+> `origin/main`, keeping both sides — see the merge commit.
+>
 > ## RESOLVED 2026-08-02 — option 2 is implemented
 > The Playwright fetch is ported onto `august-improvements` and working: article
 > bodies fetch again and the city check is live (it matched Charlotte and
@@ -11,7 +22,12 @@
 > "when did BAND last play CITY" data. The scraper still only accumulates forward.
 > That decision is untouched by this work.
 >
-> Also not ported: `master`'s `web.py`, `start.sh` and `--backfill`.
+> `web.py`, `start.sh` and `--backfill` all came in with the merge and are kept.
+>
+> **Known gap:** `parse_tour_dates` only handles the numeric listing format
+> (`3/25 Philadelphia, PA Milkboy`). Articles using `Oct 21 – Charlotte, NC @ Venue`
+> parse to zero dates. This predates the merge — `origin/main`'s parser has the same
+> limitation — but it means some articles record a city match with no show dates.
 
 ## Re-check 2026-08-02 — block still applies, nothing has changed
 

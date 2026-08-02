@@ -13,8 +13,12 @@ RUN python -m playwright install-deps firefox && \
     python -m playwright install firefox
 
 COPY *.py .
+COPY start.sh .
 
 # Overwritten by the mounted volume at runtime; present so local runs work too.
 RUN mkdir articles
 
-CMD [ "python", "main.py" ]
+# start.sh runs the scraper loop and the web UI side by side.
+EXPOSE 5000
+
+CMD [ "sh", "start.sh" ]

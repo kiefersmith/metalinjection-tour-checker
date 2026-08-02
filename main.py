@@ -2,9 +2,13 @@ import requests
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 from contextlib import contextmanager
+from collections import namedtuple
+from datetime import datetime
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+import argparse
+import random
 import time
 import json
 import os
@@ -12,7 +16,13 @@ import logging
 import sys
 import re
 
-from db import init_db, insert_article, known_urls
+from db import (
+    init_db,
+    insert_article,
+    known_urls,
+    insert_tour_dates,
+    articles_without_tour_dates,
+)
 
 # Email configuration
 EMAIL_ADDRESS = "kieferisgreat@gmail.com"
@@ -98,40 +108,47 @@ def article_fetcher():
         finally:
             browser.close()
 
-def cities_in_article(url, fetch):
-    """Returns the cities of interest named in the article body, in SEARCH_CITIES order."""
+# What one article fetch yielded. `text` is kept because the tour-date parser
+# needs the body, and re-fetching it later would mean a second trip through the
+# browser for every article.
+ArticleCheck = namedtuple("ArticleCheck", "cities text")
+
+def check_article(url, fetch):
+    """Returns an ArticleCheck for one article: matched cities and the body text."""
     body = BeautifulSoup(fetch(url), "html.parser").find("div", class_="zox-post-main")
     if body is None:
         # Not a standard post layout (video embed, redirect, ...); nothing to match on.
         logging.warning("No article body found at %s", url)
-        return []
+        return ArticleCheck([], "")
 
     text = body.get_text(" ", strip=True)
     found = {match.group(1).lower() for match in CITY_PATTERN.finditer(text)}
-    return [city for city in SEARCH_CITIES if city.lower() in found]
+    cities = [city for city in SEARCH_CITIES if city.lower() in found]
+    return ArticleCheck(cities, text)
 
-def find_cities(content_list):
-    """Maps each article URL to the cities of interest it mentions.
+def check_articles(content_list):
+    """Maps each article URL to its ArticleCheck, or None if it couldn't be read.
 
     A single unreachable or oddly-shaped article must not abort the whole run, so
     failures here are logged and the article is mapped to None — "not checked",
-    which is deliberately different from [] ("checked, no cities"). Widespread
-    failure is a different problem — usually rate limiting — and is called out
-    loudly, because otherwise it is indistinguishable from "no cities mentioned".
+    which is deliberately different from ArticleCheck([], ...) ("checked, no
+    cities"). Widespread failure is a different problem — usually the Cloudflare
+    rule tightening — and is called out loudly, because otherwise it is
+    indistinguishable from "no cities mentioned".
     """
-    cities_by_url = {article["url"]: None for article in content_list}
+    checks_by_url = {article["url"]: None for article in content_list}
     if not content_list:
-        return cities_by_url
+        return checks_by_url
 
     try:
         with article_fetcher() as fetch:
-            failures, checked = _check_each_article(content_list, cities_by_url, fetch)
+            failures, checked = _check_each_article(content_list, checks_by_url, fetch)
     except Exception:
         # The browser could not start at all — missing binary, missing system
         # libraries. Every article stays None ("not checked") rather than being
         # recorded as "no cities".
         logging.exception("Could not start the browser; no city checks ran")
-        return cities_by_url
+        return checks_by_url
 
     if failures and failures == checked:
         logging.error(
@@ -142,10 +159,10 @@ def find_cities(content_list):
     elif failures:
         logging.warning("%d of %d city checks failed", failures, checked)
 
-    return cities_by_url
+    return checks_by_url
 
-def _check_each_article(content_list, cities_by_url, fetch):
-    """Fills in cities_by_url in place; returns (failures, articles attempted)."""
+def _check_each_article(content_list, checks_by_url, fetch):
+    """Fills in checks_by_url in place; returns (failures, articles attempted)."""
     failures = 0
     consecutive = 0
     checked = 0
@@ -167,7 +184,7 @@ def _check_each_article(content_list, cities_by_url, fetch):
 
         checked += 1
         try:
-            cities_by_url[content["url"]] = cities_in_article(content["url"], fetch)
+            checks_by_url[content["url"]] = check_article(content["url"], fetch)
             consecutive = 0
         except Exception:
             failures += 1
@@ -274,11 +291,12 @@ def _finish_run(run):
 
     return [part for part in _split_on_ampersand(text) if part]
 
-def format_articles(heading, articles, empty_text=None, cities_by_url=None):
+def format_articles(heading, articles, empty_text=None, checks_by_url=None):
     lines = [heading]
     if articles:
         for article in articles:
-            cities = (cities_by_url or {}).get(article["url"])
+            check = (checks_by_url or {}).get(article["url"])
+            cities = check.cities if check else None
             suffix = f' [{", ".join(cities)}]' if cities else ""
             lines.append(f'- {article["title"]}{suffix} {article["url"]}')
     else:
@@ -329,6 +347,100 @@ def migrate_legacy_articles():
     os.rename(LEGACY_CONTENT_FILE, LEGACY_CONTENT_FILE + ".migrated")
     logging.info("Migrated %d article(s) from %s into the database", added, LEGACY_CONTENT_FILE)
 
+def parse_tour_dates(article_text, year_hint=None):
+    """Parses individual show dates out of an article body.
+
+    Articles list dates as concatenated text like:
+    3/25 Philadelphia, PA Milkboy3/26 Hamden, CT Cellar on Treadwell
+
+    Returns list of (date_iso, city, state, venue) tuples.
+    """
+    if not article_text:
+        return []
+
+    # Infer year from article text or default to current year
+    if year_hint is None:
+        year_match = re.search(r'20[2-3]\d', article_text)
+        year_hint = int(year_match.group()) if year_match else datetime.now().year
+
+    # Preprocess: insert a newline before date patterns that are glued to
+    # previous text (e.g. "Venue 20265/16" -> "Venue 2026\n5/16")
+    text = re.sub(r'(20\d{2})(\d{1,2}/\d{1,2})', r'\1\n\2', article_text)
+    # Also split when venue text runs directly into a date like "Club5/18"
+    text = re.sub(r'([a-zA-Z)])(\d{1,2}/\d{1,2}\s)', r'\1\n\2', text)
+
+    # Pattern: M/DD City, ST Venue (followed by next date or end of line)
+    pattern = r'(\d{1,2}/\d{1,2})\s+(.+?,\s*[A-Z]{2})\s+(.+?)(?=\n?\d{1,2}/|$)'
+    matches = re.findall(pattern, text)
+
+    results = []
+    for date_str, city_state, venue in matches:
+        # Strip trailing year (e.g. "Venue Name 2026" -> "Venue Name")
+        venue = re.sub(r'\s*20\d{2}$', '', venue.strip())
+        if not venue:
+            continue
+        parts = city_state.rsplit(',', 1)
+        if len(parts) != 2:
+            continue
+        city = parts[0].strip()
+        state = parts[1].strip()
+
+        try:
+            month, day = date_str.split('/')
+            month_int, day_int = int(month), int(day)
+            if month_int < 1 or month_int > 12 or day_int < 1 or day_int > 31:
+                continue
+            date_iso = f"{year_hint}-{month_int:02d}-{day_int:02d}"
+        except (ValueError, IndexError):
+            continue
+
+        results.append((date_iso, city, state, venue))
+
+    # Deduplicate while preserving order
+    seen = set()
+    unique = []
+    for r in results:
+        if r not in seen:
+            seen.add(r)
+            unique.append(r)
+    return unique
+
+def backfill_tour_dates():
+    """Re-fetches articles that have no show dates recorded and parses them.
+
+    Useful after a spell where article fetches were failing, or after the date
+    parser improves. Articles that already have rows are left alone.
+    """
+    init_db(band_extractor=extract_band_names)
+    articles = articles_without_tour_dates()
+    if not articles:
+        logging.info("Nothing to backfill; every article already has show dates.")
+        return
+
+    logging.info("Backfilling show dates for %d article(s)", len(articles))
+    filled = 0
+    try:
+        with article_fetcher() as fetch:
+            for index, (article_id, title, url) in enumerate(articles):
+                if index:
+                    time.sleep(FETCH_DELAY)
+                try:
+                    check = check_article(url, fetch)
+                    dates = parse_tour_dates(check.text)
+                    if dates:
+                        insert_tour_dates(article_id, extract_band_names(title), dates)
+                        filled += 1
+                        logging.info("Backfilled %d date(s) for: %s", len(dates), title)
+                    else:
+                        logging.info("No show dates found in: %s", title)
+                except Exception:
+                    logging.exception("Could not backfill %s", url)
+    except Exception:
+        logging.exception("Could not start the browser; backfill did not run")
+        return
+
+    logging.info("Backfill complete: %d of %d article(s) gained dates", filled, len(articles))
+
 def monitor_page():
     try:
         init_db(band_extractor=extract_band_names)
@@ -340,12 +452,15 @@ def monitor_page():
 
         if articles_to_send:
             logging.info("Found %d new article(s)", len(articles_to_send))
-            cities_by_url = find_cities(articles_to_send)
-            articles_city = [a for a in articles_to_send if cities_by_url.get(a["url"])]
+            checks_by_url = check_articles(articles_to_send)
+            articles_city = [
+                a for a in articles_to_send
+                if (checks_by_url.get(a["url"]) or ArticleCheck([], "")).cities
+            ]
 
             # Distinguish "checked, nothing matched" from "could not check", so a
             # blocked run never reads as good news.
-            unchecked = sum(1 for value in cities_by_url.values() if value is None)
+            unchecked = sum(1 for value in checks_by_url.values() if value is None)
             if unchecked == len(articles_to_send):
                 empty_text = "(could not check — every article fetch failed, see logs)"
             elif unchecked:
@@ -357,7 +472,7 @@ def monitor_page():
                 "These announcements have a city of interest in them:",
                 articles_city,
                 empty_text=empty_text,
-                cities_by_url=cities_by_url,
+                checks_by_url=checks_by_url,
             )
             email_body += "\n" + format_articles(
                 "Here are the latest articles:", articles_to_send
@@ -372,11 +487,17 @@ def monitor_page():
             # they stay unseen and are retried on the next run rather than lost.
             for article in articles_to_send:
                 bands = extract_band_names(article["title"])
+                check = checks_by_url.get(article["url"])
                 # None here means the check failed, and is stored as "unknown"
                 # rather than as "no cities".
-                insert_article(
-                    article["title"], bands, article["url"], cities_by_url.get(article["url"])
+                article_id = insert_article(
+                    article["title"], bands, article["url"],
+                    check.cities if check else None,
                 )
+                # The body text is already in hand from the city check, so the
+                # individual show dates come for free — no second fetch.
+                if article_id and check and check.text:
+                    insert_tour_dates(article_id, bands, parse_tour_dates(check.text))
         else:
             logging.info("No changes found.")
 
@@ -384,6 +505,19 @@ def monitor_page():
         logging.exception("Run failed")
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Monitor metalinjection.net for tour announcements.")
+    parser.add_argument(
+        "--backfill",
+        action="store_true",
+        help="Parse show dates for articles already stored, then exit.",
+    )
+    args = parser.parse_args()
+
+    if args.backfill:
+        # No email is sent, so a missing password is fine here.
+        backfill_tour_dates()
+        sys.exit(0)
+
     # Fail immediately on a misconfigured container rather than after a full
     # scrape cycle 12 hours from now.
     if not EMAIL_PASSWORD:
@@ -391,4 +525,6 @@ if __name__ == "__main__":
 
     while True:
         monitor_page()
-        time.sleep(CHECK_INTERVAL)
+        # Jitter so repeated restarts don't settle into hitting the site at the
+        # same moment every cycle.
+        time.sleep(CHECK_INTERVAL + random.randint(0, 1800))
