@@ -125,12 +125,20 @@ def find_cities(content_list):
     return cities_by_url
 
 # All-caps words that show up in headlines but are never band names on their own.
+# Everything here genuinely appears capitalised in copy — "LISTEN:", "U.S.", "NYC".
 NON_BAND_TOKENS = {
     "US", "USA", "UK", "EU", "NYC", "LA", "TV", "EP", "LP", "CD", "DVD", "VIP",
-    "AND", "OR", "VS", "OF", "IN", "ON", "AT", "TO", "FOR", "WITH", "AN",
-    "NEW", "LIVE", "TOUR", "TOURS", "SHOW", "SHOWS", "DATES", "VIDEO", "WATCH",
-    "FT", "FEAT", "DJ", "RIP", "PSA", "WTF", "OMG", "NSFW", "MORE",
+    "NEW", "LIVE", "TOUR", "TOURS", "SHOW", "SHOWS", "DATES", "VIDEO",
+    "WATCH", "LISTEN", "PREMIERE", "STREAM",
+    "FT", "FEAT", "DJ", "RIP", "PSA", "WTF", "OMG", "NSFW",
 }
+
+# Connectives ("OF", "AND", "A", "THE", "IN", "TO", "NO", "MORE") are deliberately
+# absent from that set. This site writes band names in ALL CAPS and editorial prose
+# in Title Case, so a capitalised connective is nearly always *inside* a name —
+# CORROSION OF CONFORMITY, COHEED AND CAMBRIA, A PERFECT CIRCLE, IN FLAMES,
+# STICK TO YOUR GUNS, FAITH NO MORE. The editorial forms are Title Case ("Of",
+# "And", "More"), so they already end a run by failing _is_caps_token().
 
 # Bands whose names genuinely contain '&'. Without these, 'X & Y' is assumed to be
 # two separate acts, which is how these headlines read the vast majority of the time.
@@ -146,9 +154,14 @@ def _is_filler(token):
     return token == "&" or _normalize(token) in NON_BAND_TOKENS
 
 def _is_caps_token(token):
-    """True for an all-caps word long enough to plausibly be part of a band name."""
+    """True for an all-caps word that could be part of a band name.
+
+    Single letters count, so 'A PERFECT CIRCLE' keeps its first word. A stray 'A'
+    from Title Case prose ('In A Connecticut Arena') survives this check but is
+    thrown out by _finish_run(), which refuses one-letter runs.
+    """
     core = token.strip("-/.'")
-    if len(core) < 2 or core != core.upper():
+    if not core or core != core.upper():
         return False
     return any(ch.isalpha() for ch in core)
 
@@ -162,12 +175,19 @@ def extract_band_names(title):
     """Pulls likely band names out of a headline by finding runs of all-caps words."""
     bands = set()
     # Only true separators end a run; letters of any alphabet are left intact so
-    # names like 'ILL NIÑO' survive.
-    for segment in re.split(r"[,;:()\[\]|\"“”…]+", title):
+    # names like 'ILL NIÑO' survive. '|' is not a separator — BIG|BRAVE is one band.
+    for segment in re.split(r"[,;:()\[\]\"“”…]+", title):
         run = []
         for token in segment.split():
-            # A digits-only token continues a run ('POWERMAN 5000') but can't start one.
-            if _is_caps_token(token) or token == "&" or (run and not any(c.isalpha() for c in token)):
+            # A numeric token continues a run ('POWERMAN 5000') but can't start one.
+            # It has to actually contain a digit, so a stray '+' ends the run
+            # instead of being swallowed ('IN FLAMES + More').
+            numeric_tail = (
+                run
+                and any(ch.isdigit() for ch in token)
+                and not any(ch.isalpha() for ch in token)
+            )
+            if _is_caps_token(token) or token == "&" or numeric_tail:
                 run.append(token)
                 continue
             bands.update(_finish_run(run))
@@ -184,7 +204,13 @@ def _finish_run(run):
         run = run[1:]
     while run and (_is_filler(run[-1]) or _normalize(run[-1]) == "THE"):
         run = run[:-1]
-    if not run or (len(run) == 1 and _normalize(run[0]) == "THE"):
+    if not run:
+        return []
+    # A run of one short token is the stray article from Title Case prose
+    # ('In A Connecticut Arena'), not a band. Costs us one-letter acts like X.
+    if len(run) == 1 and len(_normalize(run[0])) < 2:
+        return []
+    if len(run) == 1 and _normalize(run[0]) == "THE":
         return []
 
     text = " ".join(run)
