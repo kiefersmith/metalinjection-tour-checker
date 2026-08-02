@@ -1,4 +1,3 @@
 requests
-bs4
-secure-smtplib
-setuptools
+beautifulsoup4
+tabulate

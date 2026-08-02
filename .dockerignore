@@ -1,0 +1,8 @@
+venv/
+.git/
+.gitignore
+articles/
+__pycache__/
+*.pyc
+.claude/
+README.md
