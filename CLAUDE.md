@@ -30,9 +30,9 @@ There are no tests, linter, or build step configured.
 ## Architecture
 
 **main.py** — Single-file application containing all core logic:
-- Listing page scraped with `requests` + BeautifulSoup; individual article pages fetched with `playwright` (headless Firefox) to bypass Cloudflare bot protection
-- A persistent `requests.Session` with Firefox-like headers (User-Agent, Accept, Accept-Language, DNT) is used for the listing page; `Accept-Encoding` is intentionally omitted so the server does not respond with Brotli, which `requests` cannot decompress
-- Article extraction targets `article.zox-art-wrap` elements (changed from the old `div#zox-home-cont-wrap` wrapper which no longer exists in the site's HTML)
+- Every page — the listing page and each article — is fetched with `playwright` (headless Firefox) and parsed with BeautifulSoup. Cloudflare returns 403 to plain HTTP clients whatever headers they send; the listing page escaped that via the edge cache until September 2026, then got blocked too. One browser instance serves a whole run (`article_fetcher()` in `monitor_page`)
+- Listing extraction reads `div.zox-art-title` entries inside `div#zox-home-cont-wrap`
+- A failed run sends no email, so the main loop emails an alert after `ALERT_AFTER_FAILED_RUNS` consecutive failed runs (once per streak, with the traceback)
 - City search is case-sensitive substring matching in article paragraph text
 - Band name extraction uses regex for ALL-CAPS names from titles
 - SQLite storage → email notification

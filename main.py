@@ -1,4 +1,3 @@
-import requests
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 from contextlib import contextmanager
@@ -14,6 +13,7 @@ import json
 import os
 import logging
 import sys
+import traceback
 import re
 
 import geo
@@ -38,6 +38,10 @@ CHECK_INTERVAL = 12*3600  # in seconds
 REQUEST_TIMEOUT = 30  # seconds; without this a stalled connection blocks forever
 FETCH_DELAY = 2  # seconds between article fetches, to stay a polite client
 FAILURE_CUTOFF = 3  # consecutive article failures before abandoning city checks for a run
+# Failed runs in a row before emailing an alert. A failed run sends no email, so
+# without this a lasting failure looks exactly like "no new tours" — it once went
+# unnoticed for five months. Two runs is about a day, enough to ride out a blip.
+ALERT_AFTER_FAILED_RUNS = 2
 LEGACY_CONTENT_FILE = "articles/previous_articles.json"
 # Where you are. Any show within RADIUS_MILES of here counts, which catches
 # nearby cities you'd never think to list (Durham is 21 miles out; Fayetteville
@@ -84,15 +88,6 @@ def describe_place(city, state):
     return f"{city}, {state}" + (f" ({distance:.0f} mi)" if distance is not None else "")
 
 
-def get_page_content(url):
-    response = requests.get(
-        url,
-        timeout=REQUEST_TIMEOUT,
-        headers={"User-Agent": "metal-tour-check (personal tour-date notifier)"},
-    )
-    response.raise_for_status()
-    return response.text
-
 def find_new_articles(articles, seen_urls):
     """Finds articles whose URLs haven't been recorded yet."""
     return [article for article in articles if article["url"] not in seen_urls]
@@ -114,10 +109,11 @@ def extract_content(content):
 def article_fetcher():
     """Yields a url -> html callable backed by one headless Firefox instance.
 
-    Article pages sit behind Cloudflare, which returns 403 to plain HTTP clients
+    The whole site sits behind Cloudflare, which returns 403 to plain HTTP clients
     whatever headers they send — a full Firefox-like header set still gets
-    blocked, so only a real browser engine gets through. The listing page is
-    exempt because it's served from the edge cache, and still uses requests.
+    blocked, so only a real browser engine gets through. The listing page used to
+    be exempt, served from the edge cache, until that stopped in 2026; it now
+    goes through here too.
 
     The browser is launched once per run, not once per article: startup costs
     far more than the fetch itself.
@@ -194,8 +190,11 @@ def _unique_places(pairs):
             unique.append((city, state.upper()))
     return unique
 
-def check_articles(content_list):
+def check_articles(content_list, fetch):
     """Maps each article URL to its ArticleCheck, or None if it couldn't be read.
+
+    fetch is the run's article_fetcher, shared with the listing-page fetch so the
+    browser only starts once.
 
     A single unreachable or oddly-shaped article must not abort the whole run, so
     failures here are logged and the article is mapped to None — "not checked",
@@ -208,15 +207,7 @@ def check_articles(content_list):
     if not content_list:
         return checks_by_url
 
-    try:
-        with article_fetcher() as fetch:
-            failures, checked = _check_each_article(content_list, checks_by_url, fetch)
-    except Exception:
-        # The browser could not start at all — missing binary, missing system
-        # libraries. Every article stays None ("not checked") rather than being
-        # recorded as "no cities".
-        logging.exception("Could not start the browser; no city checks ran")
-        return checks_by_url
+    failures, checked = _check_each_article(content_list, checks_by_url, fetch)
 
     if failures and failures == checked:
         logging.error(
@@ -393,6 +384,19 @@ def send_email(subject, body):
         server.send_message(msg)
     logging.info("Sent email to %s", TO_EMAIL)
 
+def send_failure_alert(failed_runs, error):
+    """Emails that the monitor keeps failing. Never raises: the alert is a
+    best-effort extra, and the loop must keep running either way."""
+    try:
+        send_email(
+            "Metal Tour Check is failing",
+            f"The last {failed_runs} runs failed, so no tour updates are being "
+            f"checked. It will keep retrying every 12 hours; you'll get no more "
+            f"alerts until a run succeeds.\n\nLatest error:\n\n{error}",
+        )
+    except Exception:
+        logging.exception("Could not send the failure alert")
+
 def migrate_legacy_articles():
     """Seeds the DB from the old previous_articles.json, once.
 
@@ -551,68 +555,77 @@ def backfill_tour_dates():
     logging.info("Backfill complete: %d of %d article(s) gained dates", filled, len(articles))
 
 def monitor_page():
+    """Runs one check. Returns None on success, or the traceback of a run that
+    failed outright, so the caller can notice a streak of failures and say why.
+    """
     try:
         init_db(band_extractor=extract_band_names)
         migrate_legacy_articles()
-
-        content = get_page_content(URL)
-        articles = extract_content(content)
-        articles_to_send = find_new_articles(articles, known_urls())
-
-        if articles_to_send:
-            logging.info("Found %d new article(s)", len(articles_to_send))
-            checks_by_url = check_articles(articles_to_send)
-            articles_city = [
-                a for a in articles_to_send
-                if (checks_by_url.get(a["url"]) or EMPTY_CHECK).places
-            ]
-
-            # Distinguish "checked, nothing matched" from "could not check", so a
-            # blocked run never reads as good news.
-            unchecked = sum(1 for value in checks_by_url.values() if value is None)
-            if unchecked == len(articles_to_send):
-                empty_text = "(could not check — every article fetch failed, see logs)"
-            elif unchecked:
-                empty_text = f"(none found, but {unchecked} article(s) could not be checked)"
-            else:
-                empty_text = "(no shows near you this time)"
-
-            email_body = format_articles(
-                f"These announcements have a show within {RADIUS_MILES} miles of "
-                f"{HOME[0]}, {HOME[1]} (or in your listed cities):",
-                articles_city,
-                empty_text=empty_text,
-                checks_by_url=checks_by_url,
-            )
-            email_body += "\n" + format_articles(
-                "Here are the latest articles:", articles_to_send
-            )
-            logging.debug(email_body)
-            send_email(
-                "Metalinjection Tour Page Update Detected",
-                email_body
-            )
-
-            # Only record articles once the email is actually out. If sending fails,
-            # they stay unseen and are retried on the next run rather than lost.
-            for article in articles_to_send:
-                bands = extract_band_names(article["title"])
-                check = checks_by_url.get(article["url"])
-                # None here means the check failed, and is stored as "unknown"
-                # rather than as "no cities".
-                article_id = insert_article(
-                    article["title"], bands, article["url"],
-                    check.places if check else None,
-                )
-                # Dates were already parsed during the check, so storing them
-                # costs nothing extra here.
-                if article_id and check:
-                    insert_tour_dates(article_id, bands, check.dates)
-        else:
-            logging.info("No changes found.")
-
+        # One browser serves the listing page and every article in the run.
+        with article_fetcher() as fetch:
+            _check_for_new_articles(fetch)
+        return None
     except Exception:
         logging.exception("Run failed")
+        return traceback.format_exc()
+
+def _check_for_new_articles(fetch):
+    content = fetch(URL)
+    articles = extract_content(content)
+    articles_to_send = find_new_articles(articles, known_urls())
+
+    if articles_to_send:
+        logging.info("Found %d new article(s)", len(articles_to_send))
+        checks_by_url = check_articles(articles_to_send, fetch)
+        articles_city = [
+            a for a in articles_to_send
+            if (checks_by_url.get(a["url"]) or EMPTY_CHECK).places
+        ]
+
+        # Distinguish "checked, nothing matched" from "could not check", so a
+        # blocked run never reads as good news.
+        unchecked = sum(1 for value in checks_by_url.values() if value is None)
+        if unchecked == len(articles_to_send):
+            empty_text = "(could not check — every article fetch failed, see logs)"
+        elif unchecked:
+            empty_text = f"(none found, but {unchecked} article(s) could not be checked)"
+        else:
+            empty_text = "(no shows near you this time)"
+
+        email_body = format_articles(
+            f"These announcements have a show within {RADIUS_MILES} miles of "
+            f"{HOME[0]}, {HOME[1]} (or in your listed cities):",
+            articles_city,
+            empty_text=empty_text,
+            checks_by_url=checks_by_url,
+        )
+        email_body += "\n" + format_articles(
+            "Here are the latest articles:", articles_to_send
+        )
+        logging.debug(email_body)
+        send_email(
+            "Metalinjection Tour Page Update Detected",
+            email_body
+        )
+
+        # Only record articles once the email is actually out. If sending fails,
+        # they stay unseen and are retried on the next run rather than lost.
+        for article in articles_to_send:
+            bands = extract_band_names(article["title"])
+            check = checks_by_url.get(article["url"])
+            # None here means the check failed, and is stored as "unknown"
+            # rather than as "no cities".
+            article_id = insert_article(
+                article["title"], bands, article["url"],
+                check.places if check else None,
+            )
+            # Dates were already parsed during the check, so storing them
+            # costs nothing extra here.
+            if article_id and check:
+                insert_tour_dates(article_id, bands, check.dates)
+    else:
+        logging.info("No changes found.")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Monitor metalinjection.net for tour announcements.")
@@ -633,8 +646,19 @@ if __name__ == "__main__":
     if not EMAIL_PASSWORD:
         sys.exit("EMAIL_PASSWORD is not set; refusing to start.")
 
+    failed_runs = 0
     while True:
-        monitor_page()
+        error = monitor_page()
+        if error is None:
+            if failed_runs >= ALERT_AFTER_FAILED_RUNS:
+                logging.info("Run succeeded after %d failed run(s)", failed_runs)
+            failed_runs = 0
+        else:
+            failed_runs += 1
+            # Send once per streak: a lasting block would otherwise mean an alert
+            # every 12 hours.
+            if failed_runs == ALERT_AFTER_FAILED_RUNS:
+                send_failure_alert(failed_runs, error)
         # Jitter so repeated restarts don't settle into hitting the site at the
         # same moment every cycle.
         time.sleep(CHECK_INTERVAL + random.randint(0, 1800))

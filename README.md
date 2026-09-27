@@ -65,17 +65,19 @@ Cities column: a city matched, but which one wasn't stored at the time.
 **Note:** the site's Cloudflare configuration returns 403 to plain HTTP clients on
 individual article pages, and has since roughly April 2026. Browser-like request
 headers don't help — only a real browser engine gets through — so article bodies are
-fetched with Playwright's headless Firefox. The category listing still uses `requests`,
-because it's served from Cloudflare's edge cache.
+fetched with Playwright's headless Firefox. The category listing got the same block in
+September 2026 (until then it was served from Cloudflare's edge cache), so it goes
+through the same browser now.
 
 Two consequences worth knowing:
 
 - **`requirements.txt` alone isn't enough.** After `pip install -r requirements.txt`,
   run `playwright install firefox` to fetch the browser binary. The Docker image does
   this at build time.
-- **The listing page depends on the exact URL.** `/category/tour-dates` is cached and
-  returns 200; `/category/tour-dates/` *with* a trailing slash misses the cache and gets
-  403. Don't "tidy" the `URL` constant in `main.py`.
+
+If a whole run fails (the listing page can't be fetched, the browser won't start), no
+update email goes out. After two failed runs in a row you get a "Metal Tour Check is
+failing" email with the error instead, once per streak.
 
 If a fetch fails, the article is stored with `city_found` NULL ("not checked"), which is
 deliberately distinct from 0 ("checked, nothing matched"), and the email says so.
