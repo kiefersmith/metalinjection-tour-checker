@@ -68,4 +68,4 @@ Email settings, `HOME`, `RADIUS_MILES` and `SEARCH_CITIES` are hardcoded constan
 
 ## Docker
 
-The image is based on `python:3.12-slim` (Debian). Alpine is not supported because playwright requires glibc and system libraries not available on Alpine. The Dockerfile installs playwright's Firefox browser binary via `playwright install-deps firefox && playwright install firefox` as part of the build.
+The image is based on `python:3.12-slim` (Debian). Alpine is not supported because playwright requires glibc and system libraries not available on Alpine. The Dockerfile installs playwright's Firefox browser binary via `playwright install-deps firefox && playwright install firefox` as part of the build. It also deletes geonamescache's larger city datasets (~165 MB), keeping only `cities15000.json`, which is the one `geo.py` loads; lowering geo.py's population cutoff means updating that line too.

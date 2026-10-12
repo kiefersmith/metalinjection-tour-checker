@@ -5,7 +5,11 @@ WORKDIR /app
 
 COPY requirements.txt .
 
-RUN pip install --no-cache-dir -r requirements.txt
+# geonamescache ships four city datasets (~180 MB); geo.py's GeonamesCache()
+# defaults to the 15000-population one, so the other ~165 MB is never read.
+RUN pip install --no-cache-dir -r requirements.txt && \
+    find /usr/local/lib/python3.12/site-packages/geonamescache/data \
+      -name 'cities*.json' ! -name 'cities15000.json' -delete
 
 # Pulls the system libraries Firefox needs, then the browser itself. Kept above
 # the source COPY so a code change doesn't re-download the browser.
