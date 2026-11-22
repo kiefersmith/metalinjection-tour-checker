@@ -32,15 +32,16 @@ python web.py
 # Tests (plain scripts, no framework)
 python test_bands.py
 python test_cities.py
+python test_feed.py
 ```
 
-There is no linter. CI (`.github/workflows/`) builds the Docker image, runs both test scripts inside it, and checks that the bundled Firefox launches.
+There is no linter. CI (`.github/workflows/`) builds the Docker image, runs the test scripts inside it, and checks that the bundled Firefox launches.
 
 ## Architecture
 
 **main.py** — Single-file application containing all core logic:
-- Every page — the listing page and each article — is fetched with `playwright` (headless Firefox) and parsed with BeautifulSoup. Cloudflare returns 403 to plain HTTP clients whatever headers they send; the listing page escaped that via the edge cache until September 2026, then got blocked too. One browser instance serves a whole run (`article_fetcher()` in `monitor_page`)
-- Listing extraction reads `div.zox-art-title` entries inside `div#zox-home-cont-wrap`
+- The listing comes from the category RSS feed (`FEED_URL`, fetched with `urllib`), because since November 2026 every HTML page on the site is behind a Cloudflare challenge that headless Firefox can't pass. `extract_content` parses the feed's `<item>`s, and band names come from the feed's `<mi:artists>`, falling back to the all-caps title regex when it's empty (titles are now in Title Case)
+- Article bodies are still fetched with `playwright` (headless Firefox) and parsed with BeautifulSoup, but they currently 403 too, so city/date checks fail and new articles are stored with `city_found` NULL. They're still attempted so matching comes back if the block lifts. The feed has no article bodies. The browser starts only when there are new articles (`article_fetcher()` in `_check_for_new_articles`)
 - A failed run sends no email, so the main loop emails an alert after `ALERT_AFTER_FAILED_RUNS` consecutive failed runs (once per streak, with the traceback)
 - Location matching (`check_article`) works on "City, ST" pairs, never bare city names, so Jacksonville FL and a person named Charlotte don't match. It prefers the show rows from `parse_tour_dates`, and only falls back to "City, ST" in the prose when no dates parse. A pair counts if it's within `RADIUS_MILES` of `HOME`, or is listed in `SEARCH_CITIES` (for long drives and for towns the geocoder can't resolve)
 - An article whose fetch fails is stored with `city_found` NULL ("not checked"), which is deliberately distinct from 0 ("checked, nothing matched")

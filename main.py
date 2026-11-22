@@ -15,6 +15,8 @@ import logging
 import sys
 import traceback
 import re
+import urllib.request
+import xml.etree.ElementTree as ElementTree
 
 import geo
 from db import (
@@ -34,6 +36,13 @@ SMTP_PORT = 587
 
 # Monitoring configuration
 URL = "https://metalinjection.net/category/tour-dates"
+# The listing is read from the category's RSS feed. Since November 2026 every HTML
+# page on the site, the listing included, sits behind a Cloudflare challenge that
+# headless Firefox can't pass; the feed is still served to plain HTTP clients.
+FEED_URL = URL + "/feed"
+FEED_USER_AGENT = "metal-tour-check/1.0 (RSS reader)"
+# The site's own feed extension; <mi:artists> names the bands an article is about.
+FEED_NS = {"mi": "https://metalinjection.net/rss/klaviyo"}
 CHECK_INTERVAL = 12*3600  # in seconds
 REQUEST_TIMEOUT = 30  # seconds; without this a stalled connection blocks forever
 FETCH_DELAY = 2  # seconds between article fetches, to stay a polite client
@@ -92,17 +101,36 @@ def find_new_articles(articles, seen_urls):
     """Finds articles whose URLs haven't been recorded yet."""
     return [article for article in articles if article["url"] not in seen_urls]
 
-def extract_content(content):
+def fetch_feed(url=FEED_URL):
+    """Returns the feed XML. Raises on any HTTP error, so a block fails the run."""
+    request = urllib.request.Request(url, headers={"User-Agent": FEED_USER_AGENT})
+    with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT) as response:
+        return response.read()
+
+def extract_content(feed_xml):
+    """Parses the RSS feed into [{"title", "url", "bands"}], newest first.
+
+    Titles are written in Title Case now, so the ALL-CAPS band regex finds nothing
+    in most of them. The feed's <mi:artists> list is used instead when present.
+    It is the site's own tagging and not always complete (a support act can be
+    missing), but it beats an empty list. Items with no artists fall back to the regex.
+    """
+    channel = ElementTree.fromstring(feed_xml).find("channel")
+    if channel is None:
+        raise ValueError("Feed has no <channel>; the site may have served an error page")
     content_list = []
-    c = BeautifulSoup(content, "html.parser").find("div", id="zox-home-cont-wrap")
-    if c is None:
-        raise ValueError("Could not find the article list; the page layout may have changed")
-    for cc in c.find_all("div", class_="zox-art-title"):
-        link = cc.find("a")
-        heading = cc.find("h2")
-        if link is None or heading is None or not link.get("href"):
+    for item in channel.findall("item"):
+        title = (item.findtext("title") or "").strip()
+        url = (item.findtext("link") or "").strip()
+        if not title or not url:
             continue
-        content_list.append({"title": heading.get_text(strip=True), "url": link["href"]})
+        artists = item.findtext("mi:artists", default="", namespaces=FEED_NS)
+        bands = [a.strip() for a in artists.split(",") if a.strip()]
+        content_list.append({
+            "title": title,
+            "url": url,
+            "bands": bands or extract_band_names(title),
+        })
     return content_list
 
 @contextmanager
@@ -111,9 +139,9 @@ def article_fetcher():
 
     The whole site sits behind Cloudflare, which returns 403 to plain HTTP clients
     whatever headers they send — a full Firefox-like header set still gets
-    blocked, so only a real browser engine gets through. The listing page used to
-    be exempt, served from the edge cache, until that stopped in 2026; it now
-    goes through here too.
+    blocked. A real browser engine got through until November 2026, when the site
+    moved to a Cloudflare challenge that headless Firefox can't pass either. Only
+    article bodies come through here now; the listing comes from the RSS feed.
 
     The browser is launched once per run, not once per article: startup costs
     far more than the fetch itself.
@@ -193,8 +221,7 @@ def _unique_places(pairs):
 def check_articles(content_list, fetch):
     """Maps each article URL to its ArticleCheck, or None if it couldn't be read.
 
-    fetch is the run's article_fetcher, shared with the listing-page fetch so the
-    browser only starts once.
+    fetch is the run's article_fetcher, so the browser only starts once.
 
     A single unreachable or oddly-shaped article must not abort the whole run, so
     failures here are logged and the article is mapped to None — "not checked",
@@ -561,22 +588,23 @@ def monitor_page():
     try:
         init_db(band_extractor=extract_band_names)
         migrate_legacy_articles()
-        # One browser serves the listing page and every article in the run.
-        with article_fetcher() as fetch:
-            _check_for_new_articles(fetch)
+        _check_for_new_articles(extract_content(fetch_feed()))
         return None
     except Exception:
         logging.exception("Run failed")
         return traceback.format_exc()
 
-def _check_for_new_articles(fetch):
-    content = fetch(URL)
-    articles = extract_content(content)
+def _check_for_new_articles(articles):
     articles_to_send = find_new_articles(articles, known_urls())
 
     if articles_to_send:
         logging.info("Found %d new article(s)", len(articles_to_send))
-        checks_by_url = check_articles(articles_to_send, fetch)
+        # Article pages are behind the same Cloudflare challenge as the listing was,
+        # so these checks currently fail and the email says so. They're still tried
+        # because they start working again on their own if the block is ever lifted.
+        # The browser is only started when there's something new to check.
+        with article_fetcher() as fetch:
+            checks_by_url = check_articles(articles_to_send, fetch)
         articles_city = [
             a for a in articles_to_send
             if (checks_by_url.get(a["url"]) or EMPTY_CHECK).places
@@ -611,7 +639,7 @@ def _check_for_new_articles(fetch):
         # Only record articles once the email is actually out. If sending fails,
         # they stay unseen and are retried on the next run rather than lost.
         for article in articles_to_send:
-            bands = extract_band_names(article["title"])
+            bands = article["bands"]
             check = checks_by_url.get(article["url"])
             # None here means the check failed, and is stored as "unknown"
             # rather than as "no cities".

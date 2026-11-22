@@ -27,7 +27,7 @@ jobs:
       # Building only proves the image compiles. These prove it runs — which is
       # the part that would actually break.
       - name: Run tests inside the image
-        run: docker run --rm metal-tour-check:ci sh -c "python test_bands.py && python test_cities.py"
+        run: docker run --rm metal-tour-check:ci sh -c "python test_bands.py && python test_cities.py && python test_feed.py"
 
       - name: Check the bundled Firefox launches
         run: >

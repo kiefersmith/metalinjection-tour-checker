@@ -66,8 +66,14 @@ Cities column: a city matched, but which one wasn't stored at the time.
 individual article pages, and has since roughly April 2026. Browser-like request
 headers don't help — only a real browser engine gets through — so article bodies are
 fetched with Playwright's headless Firefox. The category listing got the same block in
-September 2026 (until then it was served from Cloudflare's edge cache), so it goes
-through the same browser now.
+September 2026 (until then it was served from Cloudflare's edge cache).
+
+In November 2026 the site moved to a Cloudflare challenge page ("Just a moment...")
+that headless Firefox can't pass either. The listing is now read from the category
+RSS feed (`/category/tour-dates/feed`), which is still served to plain HTTP clients.
+The feed has no article bodies, so article fetches, and with them city matching and
+show dates, fail for now. Update emails still go out and say the city check couldn't
+run, and those articles are stored as "not checked".
 
 Two consequences worth knowing:
 
@@ -75,7 +81,7 @@ Two consequences worth knowing:
   run `playwright install firefox` to fetch the browser binary. The Docker image does
   this at build time.
 
-If a whole run fails (the listing page can't be fetched, the browser won't start), no
+If a whole run fails (the feed can't be fetched, the browser won't start), no
 update email goes out. After two failed runs in a row you get a "Metal Tour Check is
 failing" email with the error instead, once per streak.
 
