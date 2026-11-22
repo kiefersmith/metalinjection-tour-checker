@@ -45,7 +45,7 @@ There is no linter. CI (`.github/workflows/`) builds the Docker image, runs the 
 - A failed run sends no email, so the main loop emails an alert after `ALERT_AFTER_FAILED_RUNS` consecutive failed runs (once per streak, with the traceback)
 - Location matching (`check_article`) works on "City, ST" pairs, never bare city names, so Jacksonville FL and a person named Charlotte don't match. It prefers the show rows from `parse_tour_dates`, and only falls back to "City, ST" in the prose when no dates parse. A pair counts if it's within `RADIUS_MILES` of `HOME`, or is listed in `SEARCH_CITIES` (for long drives and for towns the geocoder can't resolve)
 - An article whose fetch fails is stored with `city_found` NULL ("not checked"), which is deliberately distinct from 0 ("checked, nothing matched")
-- Band name extraction uses regex for ALL-CAPS names from titles
+- Band name extraction (`extract_band_names`) uses regex for ALL-CAPS names from titles; it's now the fallback behind the feed's `<mi:artists>`
 - New articles are emailed, then recorded in SQLite. Recording only after a successful send means a failed send is retried next run
 - Runs as an infinite loop with a 12-hour base sleep plus up to 30 minutes of random jitter; article fetches are spaced `FETCH_DELAY` (2 s) apart, and a run abandons city checks after `FAILURE_CUTOFF` consecutive fetch failures
 
@@ -69,4 +69,4 @@ Email settings, `HOME`, `RADIUS_MILES` and `SEARCH_CITIES` are hardcoded constan
 
 ## Docker
 
-The image is based on `python:3.12-slim` (Debian). Alpine is not supported because playwright requires glibc and system libraries not available on Alpine. The Dockerfile installs playwright's Firefox browser binary via `playwright install-deps firefox && playwright install firefox` as part of the build. It also deletes geonamescache's larger city datasets (~165 MB), keeping only `cities15000.json`, which is the one `geo.py` loads; lowering geo.py's population cutoff means updating that line too.
+The image is based on `python:3.12-slim` (Debian). Alpine is not supported because playwright requires glibc and system libraries not available on Alpine. The Dockerfile installs `libatomic1` (newer Playwright releases' bundled Node driver won't start without it), then playwright's Firefox browser binary via `playwright install-deps firefox && playwright install firefox` as part of the build. Playwright is unpinned, so a new release can break the build without any code change. It also deletes geonamescache's larger city datasets (~165 MB), keeping only `cities15000.json`, which is the one `geo.py` loads; lowering geo.py's population cutoff means updating that line too.

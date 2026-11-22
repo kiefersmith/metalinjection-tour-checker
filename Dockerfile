@@ -13,7 +13,11 @@ RUN pip install --no-cache-dir -r requirements.txt && \
 
 # Pulls the system libraries Firefox needs, then the browser itself. Kept above
 # the source COPY so a code change doesn't re-download the browser.
-RUN python -m playwright install-deps firefox && \
+# libatomic1 first: newer Playwright releases bundle a Node driver that needs it
+# just to run, and install-deps can't install anything until that driver starts.
+RUN apt-get update && apt-get install -y --no-install-recommends libatomic1 && \
+    rm -rf /var/lib/apt/lists/* && \
+    python -m playwright install-deps firefox && \
     python -m playwright install firefox
 
 COPY *.py .
